@@ -4,6 +4,7 @@ use Cwd;
 use ExtUtils::MakeMaker;
 eval "use ExtUtils::MakeMaker::Coverage";
 use File::Spec;
+use File::Basename;
 
 
 my ($DEBUG, %options, $DEVNULL, $is_Win32, $has_Win32);
@@ -105,6 +106,9 @@ REASON
 # missing functions with croaking stubs. 
 # We also store the list of available functions in a file for skipping the 
 # corresponding tests. 
+my $sanity_check = have_functions('pcap_open_live');
+die "Couldn't find pcap_open_live(). Something is very wrong."
+    unless $sanity_check;
 my @funcs = have_functions(find_functions());
 $options{DEFINE} .= cpp_defines(@funcs);
 open(FUNCS, '>funcs.txt') or warn "warning: can't write 'funcs.txt': $!\n";
@@ -293,7 +297,7 @@ BEGIN {
     $has_Win32 = !$@;
     $is_Win32 = ($^O eq 'MSWin32');
     if ($is_Win32) {
-        $DEVNULL = 'DEVNULL';
+        $DEVNULL = 'NUL:';
     } else {
         $DEVNULL = eval { File::Spec->devnull };
         if ($@) { $DEVNULL = '/dev/null' }
@@ -537,13 +541,35 @@ sub have_functions {
     my @funcs = ();
     print "detecting available functions... ";
 
-    my @paths = DynaLoader::dl_findfile(qw(-lpcap));
-    my $libref = DynaLoader::dl_load_file($paths[0]);
+    my @paths = DynaLoader::dl_findfile(split /\s+/, $options{LIBS});
+    die "Couldn't find any library file satisfying '$options{LIBS}'"
+        unless @paths;
+    my $libfile = $paths[0];
 
+    # On Win32, we assume that the lib file will not be statically linked
+    # but will be a thin wrapper for a similarly named .dll file.
+    # This is not universal but works in many cases
+    # This assumes that a library -l$foo will map to lib$foo.a
+    # through DynaLoader. We then try to find and load $foo.dll in $ENV{PATH}
+    if ($has_Win32) {
+        (my $dll = basename $libfile) =~ s/\.\w+$//;
+        $dll =~ s/^lib//;
+        $dll .= '.dll';
+
+        ($libfile) = grep { -f } map { File::Spec->catfile($_,$dll) } File::Spec->path;
+        die "'$dll' not found in PATH"
+            unless $libfile;
+    };
+    warn "Using '$libfile' as potential symbol candidate";
+
+    my $libref = DynaLoader::dl_load_file($libfile);
+    warn "Couldn't load $libfile via DynaLoader ($^E)"
+        unless $libref;
     for my $func (@_) {
         my $symref = DynaLoader::dl_find_symbol($libref, $func);
-        push @funcs, $func if defined $symref
-    }
+        push @funcs, $func if defined $symref;
+        #print "$func", $symref ? "" : " NOT", " found\n";
+    };
 
     print "ok\n";
     return @funcs
